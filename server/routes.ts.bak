@@ -1152,282 +1152,123 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-// Key fixes in server/routes.ts - Create subscription endpoint
-
-app.post("/api/create-subscription", async (req, res) => {
-  try {
-    const { plan, referralCode, couponCode } = req.body;
-    let baseAmount = plan === 'premium' ? 1499 : 999; // $14.99 or $9.99 in cents
-    let finalAmount = baseAmount;
-    let appliedDiscount = '';
-    let discountDetails = null;
-    
-    console.log(`Creating payment intent for ${plan} plan. Base amount: $${baseAmount/100}`);
-    
-    // Apply referral discount (highest priority - $1 first month)
-    if (referralCode) {
-      try {
-        const referralUser = await storage.getUserByUsername(referralCode.toLowerCase());
+  app.post("/api/create-subscription", async (req, res) => {
+    try {
+      const { plan, referralCode, couponCode } = req.body;
+      let amount = plan === 'premium' ? 1499 : 999; // $14.99 or $9.99 in cents
+      let appliedDiscount = '';
+      
+      // Apply referral discount (highest priority - $1 first month)
+      if (referralCode) {
+        const referralUser = await storage.getUserByUsername(referralCode);
         if (referralUser) {
-          const currentCredits = parseFloat(referralUser.referralCredits || '0');
-          const maxCredits = 15.00; // 3 referrals × $5 each
-          
-          if (currentCredits < maxCredits) {
-            finalAmount = 100; // $1.00 in cents for new users
-            appliedDiscount = 'referral';
-            discountDetails = {
-              type: 'referral',
-              originalAmount: baseAmount,
-              discountAmount: baseAmount - 100,
-              finalAmount: 100,
-              description: 'Referral discount - $1 first month'
-            };
-            console.log(`Applied referral discount. Final amount: $${finalAmount/100}`);
-          } else {
-            console.log('Referral user has reached maximum credit limit');
-          }
-        } else {
-          console.log('Invalid referral code provided');
+          amount = 100; // $1.00 in cents
+          appliedDiscount = 'referral';
         }
-      } catch (error) {
-        console.error('Error processing referral:', error);
       }
-    }
-    
-    // Apply coupon discount if no referral applied
-    if (!appliedDiscount && couponCode) {
-      try {
+      
+      // Apply coupon discount if no referral
+      if (!appliedDiscount && couponCode) {
         const coupon = await storage.getCouponByCode(couponCode);
         if (coupon && coupon.isActive) {
-          // Check expiration
-          if (coupon.expiresAt && new Date(coupon.expiresAt) < new Date()) {
-            console.log('Coupon expired');
-          } else if (coupon.maxUses && parseInt(coupon.currentUses || "0") >= parseInt(coupon.maxUses)) {
-            console.log('Coupon usage limit reached');
-          } else {
-            // Apply discount based on type
-            if (coupon.discountType === 'percent') {
-              const discountAmount = Math.round(baseAmount * (parseFloat(coupon.discountValue) / 100));
-              finalAmount = Math.max(100, baseAmount - discountAmount); // Minimum $1
-              appliedDiscount = 'coupon_percent';
-              discountDetails = {
-                type: 'percent',
-                originalAmount: baseAmount,
-                discountAmount: discountAmount,
-                finalAmount: finalAmount,
-                description: `${coupon.discountValue}% off`
-              };
-            } else if (coupon.discountType === 'amount') {
-              const discountAmount = Math.round(parseFloat(coupon.discountValue) * 100); // Convert to cents
-              finalAmount = Math.max(100, baseAmount - discountAmount); // Minimum $1
-              appliedDiscount = 'coupon_amount';
-              discountDetails = {
-                type: 'amount',
-                originalAmount: baseAmount,
-                discountAmount: discountAmount,
-                finalAmount: finalAmount,
-                description: `$${coupon.discountValue} off`
-              };
-            } else if (coupon.discountType === 'free_month') {
-              finalAmount = 0; // Free first month
-              appliedDiscount = 'coupon_free';
-              discountDetails = {
-                type: 'free_month',
-                originalAmount: baseAmount,
-                discountAmount: baseAmount,
-                finalAmount: 0,
-                description: 'Free first month'
-              };
-            }
-            console.log(`Applied coupon discount. Final amount: $${finalAmount/100}`);
+          if (coupon.discountType === 'percent') {
+            const discountAmount = amount * (parseFloat(coupon.discountValue) / 100);
+            amount = Math.max(100, amount - discountAmount); // Minimum $1
+            appliedDiscount = 'coupon_percent';
+          } else if (coupon.discountType === 'amount') {
+            const discountAmount = parseFloat(coupon.discountValue) * 100; // Convert to cents
+            amount = Math.max(100, amount - discountAmount); // Minimum $1
+            appliedDiscount = 'coupon_amount';
+          } else if (coupon.discountType === 'free_month') {
+            amount = 0; // Free first month
+            appliedDiscount = 'coupon_free';
           }
-        } else {
-          console.log('Invalid or inactive coupon code');
         }
-      } catch (error) {
-        console.error('Error processing coupon:', error);
       }
+      
+      const metadata: any = { 
+        plan: plan || 'standard', 
+        type: 'subscription',
+        appliedDiscount,
+        referralCode: referralCode || '',
+        couponCode: couponCode || ''
+      };
+      
+      // Create payment intent with calculated amount
+      const paymentIntentData: any = {
+        amount,
+        currency: "usd",
+        metadata,
+        automatic_payment_methods: {
+          enabled: true,
+        }
+      };
+      
+      const paymentIntent = await stripe.paymentIntents.create(paymentIntentData);
+      
+      console.log(`Payment intent created: ${paymentIntent.id}, amount: $${amount/100}`);
+      
+      res.json({ clientSecret: paymentIntent.client_secret });
+    } catch (error: any) {
+      console.error('Stripe payment intent error:', error);
+      res
+        .status(500)
+        .json({ message: "Error creating subscription: " + error.message });
     }
-    
-    const metadata: any = { 
-      plan: plan || 'standard', 
-      type: 'subscription',
-      appliedDiscount,
-      referralCode: referralCode || '',
-      couponCode: couponCode || '',
-      originalAmount: baseAmount.toString(),
-      finalAmount: finalAmount.toString()
-    };
-    
-    // Create payment intent with calculated amount
-    const paymentIntentData: any = {
-      amount: finalAmount,
-      currency: "usd",
-      metadata,
-      automatic_payment_methods: {
-        enabled: true,
-      }
-    };
-    
-    // Handle zero-amount payments (free subscriptions)
-    if (finalAmount === 0) {
-      paymentIntentData.confirm = true;
-      paymentIntentData.payment_method = 'pm_card_visa'; // Use a test payment method for zero-amount
-    }
-    
-    const paymentIntent = await stripe.paymentIntents.create(paymentIntentData);
-    
-    console.log(`Payment intent created: ${paymentIntent.id}`);
-    console.log(`Original amount: $${baseAmount/100}, Final amount: $${finalAmount/100}`);
-    
-    res.json({ 
-      clientSecret: paymentIntent.client_secret,
-      discountDetails: discountDetails
-    });
-  } catch (error: any) {
-    console.error('Stripe payment intent error:', error);
-    res.status(500).json({ 
-      message: "Error creating subscription: " + error.message,
-      details: error.type || 'unknown_error'
-    });
-  }
-});
+  });
 
-// Fixed complete signup endpoint
-app.post("/api/complete-signup", async (req, res) => {
-  try {
-    const { username, email, password, planType, referralCode, couponCode, paymentIntentId } = req.body;
-    
-    if (!paymentIntentId) {
-      return res.status(400).json({ error: "Payment intent ID required" });
-    }
-    
-    // Verify payment was successful or handle zero-amount case
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-    
-    // Handle both succeeded payments and zero-amount payments
-    if (paymentIntent.status !== 'succeeded' && paymentIntent.amount > 0) {
-      console.error(`Payment not completed. Status: ${paymentIntent.status}, Amount: ${paymentIntent.amount}`);
-      return res.status(400).json({ 
-        error: "Payment not completed",
-        status: paymentIntent.status
-      });
-    }
-    
-    // Check if user already exists (prevent duplicate accounts)
-    const existingUser = await storage.getUserByUsername(username);
-    if (existingUser) {
-      return res.status(400).json({ error: "Username already exists" });
-    }
-    
-    // Set expiration date based on discount type
-    const expirationDate = new Date();
-    expirationDate.setDate(expirationDate.getDate() + 30); // 30 days from now
-    
-    // Create user account now that payment is confirmed
-    const insertUser: any = { 
-      username, 
-      email, 
-      password, 
-      planType,
-      status: 'active',
-      expiresAt: expirationDate,
-      neverExpires: false
-    };
-    
-    console.log('Creating user with data:', insertUser);
-    const newUser = await storage.createUser(insertUser);
-    console.log('User created successfully:', newUser.id);
-    
-    // Process referral if applicable
-    if (referralCode) {
-      try {
-        const result = await ReferralService.applyReferral(username, referralCode);
-        console.log('Referral processing result:', result);
-      } catch (error) {
-        console.error('Error processing referral:', error);
+  // Complete signup after successful payment
+  app.post("/api/complete-signup", async (req, res) => {
+    try {
+      const { username, email, password, planType, referralCode, couponCode, paymentIntentId } = req.body;
+      
+      if (!paymentIntentId) {
+        return res.status(400).json({ error: "Payment intent ID required" });
       }
-    }
-    
-    // Increment coupon usage if applicable
-    if (couponCode) {
-      try {
+      
+      // Verify payment was successful
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+      if (paymentIntent.status !== 'succeeded') {
+        return res.status(400).json({ error: "Payment not completed" });
+      }
+      
+      // Check if user already exists (prevent duplicate accounts)
+      const existingUser = await storage.getUserByUsername(username);
+      if (existingUser) {
+        return res.status(400).json({ error: "Username already exists" });
+      }
+      
+      // Create user account now that payment is confirmed
+      const insertUser: any = { username, email, password, planType };
+      console.log('Creating user with data:', insertUser);
+      const newUser = await storage.createUser(insertUser);
+      console.log('User created successfully:', newUser.id);
+      
+      // Process referral and coupon usage tracking
+      if (referralCode) {
+        const referralUser = await storage.getUserByUsername(referralCode);
+        if (referralUser) {
+          // Process referral through referral service
+          const referralService = new ReferralService();
+          await referralService.processReferral(referralUser.id, newUser.id);
+        }
+      }
+      
+      // Increment coupon usage if applicable
+      if (couponCode) {
         const coupon = await storage.getCouponByCode(couponCode);
         if (coupon) {
           await storage.incrementCouponUse(coupon.id);
-          console.log(`Incremented coupon usage for: ${couponCode}`);
         }
-      } catch (error) {
-        console.error('Error incrementing coupon usage:', error);
       }
+      
+      res.json({ success: true, message: "Account created successfully", user: newUser });
+    } catch (error: any) {
+      console.error('Complete signup error:', error);
+      res.status(500).json({ error: "Failed to complete signup: " + error.message });
     }
-    
-    // Create user in Jellyfin server
-    try {
-      const JELLYFIN_URL = 'https://watch.alfredflix.stream';
-      const API_KEY = 'f885d4ec4e7e491bb578e0980528dd08';
-      
-      // Create user in Jellyfin
-      const jellyfinResponse = await axios.post(`${JELLYFIN_URL}/Users/New`, {
-        Name: username,
-        Password: password
-      }, {
-        headers: { 
-          'Content-Type': 'application/json',
-          'X-Emby-Token': API_KEY
-        }
-      });
+  });
 
-      const jellyfinUser = jellyfinResponse.data;
-      
-      // Update AlfredFlix user with Jellyfin ID
-      const updatedUser = await storage.updateUser(newUser.id, {
-        jellyfinUserId: jellyfinUser.Id
-      });
-
-      // Configure Jellyfin user permissions based on plan type
-      await configureJellyfinUserPermissions(jellyfinUser.Id, planType);
-      
-      // Send welcome email
-      await sendWelcomeEmail(email, username, password, planType);
-      
-      // Send admin notification
-      await sendAdminNotificationEmail(username, email, updatedUser.expiresAt, planType);
-
-      console.log(`Created user ${username} in both AlfredFlix and Jellyfin (ID: ${jellyfinUser.Id})`);
-      
-      res.json({ 
-        success: true, 
-        message: "Account created successfully", 
-        user: {
-          id: updatedUser.id,
-          username: updatedUser.username,
-          planType: updatedUser.planType
-        }
-      });
-      
-    } catch (jellyfinError) {
-      console.error('Failed to create Jellyfin user:', jellyfinError);
-      // User was created in AlfredFlix but not Jellyfin
-      res.json({ 
-        success: true, 
-        message: "Account created successfully (Jellyfin sync pending)", 
-        user: {
-          id: newUser.id,
-          username: newUser.username,
-          planType: newUser.planType
-        }
-      });
-    }
-    
-  } catch (error: any) {
-    console.error('Complete signup error:', error);
-    res.status(500).json({ 
-      error: "Failed to complete signup: " + error.message,
-      details: error.type || 'unknown_error'
-    });
-  }
-});
   // Bulk extend expiration dates for all active users
   app.post("/api/admin/bulk-extend-expiration", async (req, res) => {
     if (!req.isAuthenticated() || !req.user?.isAdmin) {

@@ -1,3 +1,4 @@
+// Fixed server/referral.ts
 import { storage } from './storage';
 import { nanoid } from 'nanoid';
 
@@ -19,21 +20,27 @@ export class ReferralService {
   // Apply referral when a new user signs up
   static async applyReferral(newUserUsername: string, referralCode: string): Promise<ReferralResult> {
     try {
+      console.log(`Processing referral for ${newUserUsername} with code ${referralCode}`);
+      
       // Find the referring user by username (case insensitive)
       const referringUser = await storage.getUserByUsername(referralCode.toLowerCase());
       
       if (!referringUser) {
+        console.log('Referring user not found');
         return {
           success: false,
           message: 'Invalid referral code'
         };
       }
 
+      console.log(`Found referring user: ${referringUser.username}`);
+
       // Check if referring user has reached max referrals (3)
       const currentCredits = parseFloat(referringUser.referralCredits || '0');
       const maxCredits = 15.00; // 3 referrals × $5 each
       
       if (currentCredits >= maxCredits) {
+        console.log(`Referring user has reached max credits: ${currentCredits}`);
         return {
           success: false,
           message: 'Referral limit reached for this user'
@@ -44,10 +51,12 @@ export class ReferralService {
       const newCredits = Math.min(currentCredits + 5.00, maxCredits);
       await storage.updateReferralCredits(referringUser.id, newCredits.toString());
 
+      console.log(`Updated referring user credits from ${currentCredits} to ${newCredits}`);
+
       // New user gets $1 first month discount
       return {
         success: true,
-        message: 'Referral applied successfully',
+        message: 'Referral applied successfully - $1 first month!',
         discount: {
           type: 'amount',
           value: 100 // $1 in cents for Stripe
@@ -65,7 +74,7 @@ export class ReferralService {
   // Get referral stats for a user
   static async getReferralStats(userId: string) {
     try {
-      const user = await storage.getUser(parseInt(userId));
+      const user = await storage.getUser(userId);
       if (!user) return null;
 
       const credits = parseFloat(user.referralCredits || '0');
@@ -81,6 +90,32 @@ export class ReferralService {
     } catch (error) {
       console.error('Error getting referral stats:', error);
       return null;
+    }
+  }
+
+  // Process referral after successful payment (called from routes.ts)
+  async processReferral(referringUserId: string, newUserId: string): Promise<void> {
+    try {
+      const referringUser = await storage.getUser(referringUserId);
+      const newUser = await storage.getUser(newUserId);
+      
+      if (!referringUser || !newUser) {
+        throw new Error('User not found');
+      }
+
+      // Add $5 credit to referring user
+      const currentCredits = parseFloat(referringUser.referralCredits || '0');
+      const maxCredits = 15.00;
+      
+      if (currentCredits < maxCredits) {
+        const newCredits = Math.min(currentCredits + 5.00, maxCredits);
+        await storage.updateReferralCredits(referringUserId, newCredits.toString());
+        
+        console.log(`Processed referral: ${referringUser.username} earned $5 credit`);
+      }
+    } catch (error) {
+      console.error('Error processing referral:', error);
+      throw error;
     }
   }
 }
