@@ -25,12 +25,11 @@ export default defineConfig({
   
   build: {
     // Crucially, we set the output directory to 'dist' at the project root.
-    // The '..' is important because the 'root' is 'client', so we need to go
-    // up one directory to put the build output in the main 'dist' folder.
-    outDir: path.resolve(import.meta.dirname, "../dist"),
+    // The path.resolve here ensures the 'dist' folder is created in the same
+    // directory as your vite.config.ts file, which is the project's root.
+    outDir: path.resolve(import.meta.dirname, "dist"),
     
-    // We also remove 'dist/public' from the output path so the files
-    // are at the root of the 'dist' directory, which is what Cloudflare Pages expects.
+    // This ensures the 'dist' folder is cleared before a new build.
     emptyOutDir: true,
   },
   
